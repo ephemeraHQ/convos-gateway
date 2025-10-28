@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/xmtp/xmtpd/pkg/gateway"
@@ -22,6 +23,7 @@ var (
 	ErrInvalidSignature = errors.New("invalid token signature")
 	ErrMissingPublicKey = errors.New("JWT_PUBLIC_KEY environment variable not set")
 	ErrInvalidPublicKey = errors.New("invalid public key format")
+	ErrTokenExpired     = errors.New("token has expired")
 )
 
 // parsePublicKey parses a PEM-encoded ECDSA public key
@@ -72,6 +74,8 @@ func jwtIdentityFn(publicKey *ecdsa.PublicKey) gateway.IdentityFn {
 				return publicKey, nil
 			},
 			jwt.WithIssuer(EXPECTED_ISSUER),
+			jwt.WithExpirationRequired(),
+			jwt.WithValidMethods([]string{"ES256"}),
 		)
 
 		if err != nil {
@@ -98,7 +102,13 @@ func jwtIdentityFn(publicKey *ecdsa.PublicKey) gateway.IdentityFn {
 			)
 		}
 
-		// @todo lourou add validation for the token expiration time
+		// Validate token expiration
+		if time.Now().After(claims.ExpiresAt.Time) {
+			return gateway.Identity{}, gateway.NewPermissionDeniedError(
+				"token has expired",
+				ErrTokenExpired,
+			)
+		}
 
 		// Return identity based on JWT claims
 		return gateway.NewUserIdentity(deviceID), nil
