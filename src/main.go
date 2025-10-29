@@ -13,6 +13,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/xmtp/xmtpd/pkg/gateway"
+	"github.com/xmtp/xmtpd/pkg/gateway/authorizers"
 )
 
 const EXPECTED_ISSUER = "convos.org"
@@ -133,14 +134,31 @@ func main() {
 	log.Println("✓ JWT authentication configured with ECDSA P-256")
 	log.Printf("✓ JWT issuer validation: %s", EXPECTED_ISSUER)
 
-	gatewayService, err := gateway.NewGatewayServiceBuilder(gateway.MustLoadConfig()).
-		WithIdentityFn(jwtIdentityFn(publicKey)).
-		WithAuthorizers(func(ctx context.Context, identity gateway.Identity, req gateway.PublishRequestSummary) (bool, error) {
-			// All authenticated requests are authorized
-			// @lourou todo: add rate limiting here
-			// Use identity to ratelimit the request
-			return true, nil
+	// Load gateway config
+	cfg := gateway.MustLoadConfig()
+
+	// Setup Redis for rate limiting
+	redis := gateway.MustSetupRedisClient(context.Background(), cfg.Redis)
+	log.Println("✓ Redis connected for rate limiting")
+
+	// Create rate limit authorizer - limits are enforced per deviceID (identity)
+	// Each unique deviceID from the JWT gets its own rate limit bucket
+	rateLimitAuthorizer := authorizers.NewRateLimitBuilder().
+		WithLogger(gateway.MustCreateLogger(cfg)).
+		WithRedis(redis).
+		// Set rate limits to 100 requests/minute per deviceID
+		WithLimits(authorizers.RateLimit{
+			Capacity:    100,
+			RefillEvery: time.Minute,
 		}).
+		MustBuild()
+
+	log.Println("✓ Rate limiting configured: 100 req/min, 500 req/hour per deviceID")
+
+	gatewayService, err := gateway.NewGatewayServiceBuilder(cfg).
+		WithRedisClient(redis).
+		WithIdentityFn(jwtIdentityFn(publicKey)).
+		WithAuthorizers(rateLimitAuthorizer).
 		Build()
 
 	if err != nil {
