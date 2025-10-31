@@ -18,6 +18,12 @@ import (
 
 const EXPECTED_ISSUER = "convos.org"
 
+const (
+	// Rate limit: 100 requests per minute per deviceID
+	rateLimitCapacity   = 100
+	rateLimitRefillTime = time.Minute
+)
+
 var (
 	ErrMissingToken     = errors.New("missing JWT token")
 	ErrInvalidToken     = errors.New("invalid JWT token")
@@ -117,6 +123,8 @@ func jwtIdentityFn(publicKey *ecdsa.PublicKey) gateway.IdentityFn {
 }
 
 func main() {
+	ctx := context.Background()
+
 	// Load JWT public key from environment
 	publicKeyPEM := os.Getenv("JWT_PUBLIC_KEY")
 	if publicKeyPEM == "" {
@@ -133,30 +141,27 @@ func main() {
 
 	log.Println("✓ JWT authentication configured with ECDSA P-256")
 	log.Printf("✓ JWT issuer validation: %s", EXPECTED_ISSUER)
+	log.Println("✓ JWT expiration validation enabled")
 
 	// Load gateway config
 	cfg := gateway.MustLoadConfig()
 
-	// Setup Redis for rate limiting
-	redis := gateway.MustSetupRedisClient(context.Background(), cfg.Redis)
+	// Setup Redis client using xmtpd config (reads XMTPD_REDIS_URL from env)
+	redisClient := gateway.MustSetupRedisClient(ctx, cfg.Redis)
 	log.Println("✓ Redis connected for rate limiting")
 
-	// Create rate limit authorizer - limits are enforced per deviceID (identity)
-	// Each unique deviceID from the JWT gets its own rate limit bucket
+	// Create rate limit authorizer - enforces limits per deviceID (identity)
 	rateLimitAuthorizer := authorizers.NewRateLimitBuilder().
-		WithLogger(gateway.MustCreateLogger(cfg)).
-		WithRedis(redis).
-		// Set rate limits to 100 requests/minute per deviceID
+		WithRedis(redisClient).
 		WithLimits(authorizers.RateLimit{
-			Capacity:    100,
-			RefillEvery: time.Minute,
+			Capacity:    rateLimitCapacity,
+			RefillEvery: rateLimitRefillTime,
 		}).
 		MustBuild()
 
-	log.Println("✓ Rate limiting configured: 100 req/min, 500 req/hour per deviceID")
+	log.Printf("✓ Rate limiting configured: %d req/%v per deviceID", rateLimitCapacity, rateLimitRefillTime)
 
 	gatewayService, err := gateway.NewGatewayServiceBuilder(cfg).
-		WithRedisClient(redis).
 		WithIdentityFn(jwtIdentityFn(publicKey)).
 		WithAuthorizers(rateLimitAuthorizer).
 		Build()
